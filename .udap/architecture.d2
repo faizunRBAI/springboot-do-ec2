@@ -1,0 +1,15 @@
+# udap:meta cloud=digitalocean region=nyc3 target=do-droplet
+
+user: Internet User { shape: person; udap-type: generic.user }
+vpc: DigitalOcean nyc3 {
+  droplet: Droplet (Ubuntu) { shape: rectangle; udap-type: do.droplet }
+  nginx: Nginx Reverse Proxy { shape: rectangle; udap-type: generic.app }
+  springboot: Spring Boot App { shape: rectangle; udap-type: generic.app }
+  firewall: DO Firewall { shape: rectangle; udap-type: generic.app }
+}
+github: GitHub Actions CI/CD { shape: rectangle; udap-type: generic.app }
+
+user -> vpc.firewall: HTTP :80
+vpc.firewall -> vpc.nginx: allowed traffic
+vpc.nginx -> vpc.springboot: proxy_pass :8080
+github -> vpc.droplet: Ansible SSH configure

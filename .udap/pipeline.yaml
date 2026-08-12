@@ -1,0 +1,143 @@
+version: 1
+name: springboot-do-ec2
+vcs: github
+
+stages:
+  - id: build
+    kind: build
+    needs: []
+    timeout_minutes: 15
+    steps:
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: temurin
+      - name: Build JAR with Maven
+        run: mvn -B package -DskipTests --no-transfer-progress
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-jar
+          path: target/*.jar
+          retention-days: 1
+
+  - id: provision
+    kind: provision
+    needs: [build]
+    timeout_minutes: 20
+    env:
+      DIGITALOCEAN_TOKEN: ${{ secrets.DO_TOKEN }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.SPACES_ACCESS_KEY }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_KEY }}
+      AWS_ENDPOINT_URL_S3: ${{ secrets.SPACES_ENDPOINT }}
+      TF_VAR_project_name: ${{ secrets.PROJECT_NAME }}
+      TF_VAR_region: nyc3
+      TF_VAR_droplet_size: s-1vcpu-1gb
+      TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+      TF_VAR_do_token: ${{ secrets.DO_TOKEN }}
+    steps:
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+      - name: Derive Spaces region and init Terraform
+        run: |
+          host="${AWS_ENDPOINT_URL_S3#https://}"
+          SPACES_REGION="${host%%.*}"
+          terraform -chdir=infra init -input=false -reconfigure \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate" \
+            -backend-config="region=${SPACES_REGION}" \
+            -backend-config="skip_credentials_validation=true" \
+            -backend-config="skip_requesting_account_id=true" \
+            -backend-config="skip_metadata_api_check=true" \
+            -backend-config="skip_region_validation=true" \
+            -backend-config="skip_s3_checksum=true" \
+            -backend-config="use_path_style=true"
+      - name: Terraform Apply
+        run: terraform -chdir=infra apply -input=false -auto-approve
+      - name: Get Droplet IP
+        id: get_ip
+        run: |
+          ip=$(terraform -chdir=infra output -raw droplet_ip)
+          echo "droplet_ip=${ip}" >> "$GITHUB_OUTPUT"
+    outputs:
+      droplet_ip: ${{ steps.get_ip.outputs.droplet_ip }}
+
+  - id: configure
+    kind: configure
+    needs: [provision]
+    timeout_minutes: 20
+    env:
+      DIGITALOCEAN_TOKEN: ${{ secrets.DO_TOKEN }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.SPACES_ACCESS_KEY }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_KEY }}
+      AWS_ENDPOINT_URL_S3: ${{ secrets.SPACES_ENDPOINT }}
+    steps:
+      - name: Download JAR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: app-jar
+          path: target/
+      - name: Install Ansible
+        run: pip install ansible-core
+      - name: Write SSH private key
+        env:
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+      - name: Scan host key
+        run: |
+          HOST="${{ needs.provision.outputs.droplet_ip }}"
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
+      - name: Generate inventory
+        run: |
+          HOST="${{ needs.provision.outputs.droplet_ip }}"
+          printf '[app]\n%s ansible_user=%s ansible_ssh_private_key_file=~/.ssh/deploy_key\n' \
+            "$HOST" "${{ secrets.SSH_USER }}" > inventory.ini
+      - name: Resolve JAR path and run Ansible playbook
+        run: |
+          JAR_PATH=$(ls "$GITHUB_WORKSPACE/target"/*.jar | head -n1)
+          ansible-playbook -i inventory.ini ansible/site.yml \
+            --extra-vars "jar_path=${JAR_PATH}"
+        env:
+          ANSIBLE_HOST_KEY_CHECKING: "False"
+
+  - id: verify
+    kind: verify
+    needs: [provision, configure]
+    timeout_minutes: 10
+    env:
+      DIGITALOCEAN_TOKEN: ${{ secrets.DO_TOKEN }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.SPACES_ACCESS_KEY }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_KEY }}
+      AWS_ENDPOINT_URL_S3: ${{ secrets.SPACES_ENDPOINT }}
+      TF_VAR_do_token: ${{ secrets.DO_TOKEN }}
+      TF_VAR_project_name: ${{ secrets.PROJECT_NAME }}
+    steps:
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+      - name: Re-init Terraform to read outputs
+        run: |
+          host="${AWS_ENDPOINT_URL_S3#https://}"
+          SPACES_REGION="${host%%.*}"
+          terraform -chdir=infra init -input=false -reconfigure \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate" \
+            -backend-config="region=${SPACES_REGION}" \
+            -backend-config="skip_credentials_validation=true" \
+            -backend-config="skip_requesting_account_id=true" \
+            -backend-config="skip_metadata_api_check=true" \
+            -backend-config="skip_region_validation=true" \
+            -backend-config="skip_s3_checksum=true" \
+            -backend-config="use_path_style=true"
+      - name: Health check app
+        run: |
+          HOST=$(terraform -chdir=infra output -raw droplet_ip)
+          echo "Checking http://$HOST/"
+          curl --fail --retry 15 --retry-delay 15 --retry-all-errors \
+            -o /dev/null -s -w "%{http_code}" "http://$HOST/"
+
+rollback:
+  strategy: manual
