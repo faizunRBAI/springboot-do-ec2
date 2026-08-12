@@ -97,12 +97,12 @@ jobs:
         '
       env:
         SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-    - name: Scan host key
-      run: 'HOST="${{ needs.provision.outputs.droplet_ip }}"
-
-        ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
-
-        '
+    - name: Wait for SSH port and scan host key
+      run: "HOST=\"${{ needs.provision.outputs.droplet_ip }}\"\necho \"Waiting for\
+        \ SSH on $HOST...\"\nfor i in $(seq 1 30); do\n  if nc -zw5 \"$HOST\" 22 2>/dev/null;\
+        \ then\n    echo \"SSH port open on attempt $i\"\n    break\n  fi\n  echo\
+        \ \"Attempt $i: SSH not yet ready, waiting 10s...\"\n  sleep 10\ndone\nssh-keyscan\
+        \ -H \"$HOST\" >> ~/.ssh/known_hosts\n"
     - name: Generate inventory
       run: "HOST=\"${{ needs.provision.outputs.droplet_ip }}\"\nprintf '[app]\\n%s\
         \ ansible_user=%s ansible_ssh_private_key_file=~/.ssh/deploy_key\\n' \\\n\

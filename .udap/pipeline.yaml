@@ -91,9 +91,18 @@ stages:
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-      - name: Scan host key
+      - name: Wait for SSH port and scan host key
         run: |
           HOST="${{ needs.provision.outputs.droplet_ip }}"
+          echo "Waiting for SSH on $HOST..."
+          for i in $(seq 1 30); do
+            if nc -zw5 "$HOST" 22 2>/dev/null; then
+              echo "SSH port open on attempt $i"
+              break
+            fi
+            echo "Attempt $i: SSH not yet ready, waiting 10s..."
+            sleep 10
+          done
           ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
       - name: Generate inventory
         run: |
