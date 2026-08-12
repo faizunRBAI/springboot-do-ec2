@@ -154,3 +154,33 @@ stages:
 
 rollback:
   strategy: manual
+
+destroy:
+  steps:
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+    - name: Derive Spaces region and destroy infrastructure
+      env:
+        DIGITALOCEAN_TOKEN: ${{ secrets.DO_TOKEN }}
+        AWS_ACCESS_KEY_ID: ${{ secrets.SPACES_ACCESS_KEY }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_KEY }}
+        AWS_ENDPOINT_URL_S3: ${{ secrets.SPACES_ENDPOINT }}
+        TF_VAR_project_name: ${{ secrets.PROJECT_NAME }}
+        TF_VAR_region: nyc3
+        TF_VAR_droplet_size: s-1vcpu-1gb
+        TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+        TF_VAR_do_token: ${{ secrets.DO_TOKEN }}
+      run: |
+        host="${AWS_ENDPOINT_URL_S3#https://}"
+        SPACES_REGION="${host%%.*}"
+        terraform -chdir=infra init -input=false -reconfigure \
+          -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+          -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate" \
+          -backend-config="region=${SPACES_REGION}" \
+          -backend-config="skip_credentials_validation=true" \
+          -backend-config="skip_requesting_account_id=true" \
+          -backend-config="skip_metadata_api_check=true" \
+          -backend-config="skip_region_validation=true" \
+          -backend-config="skip_s3_checksum=true" \
+          -backend-config="use_path_style=true"
+        terraform -chdir=infra destroy -input=false -auto-approve
