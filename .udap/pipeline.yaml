@@ -13,6 +13,10 @@ stages:
         with:
           java-version: "17"
           distribution: temurin
+      - name: Checkout source repo
+        run: |
+          git clone --depth=1 https://github.com/faizunRBAI/springboot-aws-ec2.git /tmp/src
+          rsync -av --exclude='.git' /tmp/src/ .
       - name: Build JAR with Maven
         run: mvn -B package -DskipTests --no-transfer-progress
       - name: Upload JAR artifact
